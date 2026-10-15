@@ -1,51 +1,83 @@
-name: Auto Provision Student Team & Repo
+name: Auto Provision Team Repository
 
 on:
   issues:
-    types: [opened]
+    types: [opened, edited]
 
 jobs:
   provision:
     runs-on: ubuntu-latest
+    if: contains(github.event.issue.title, '[Team Registration]')
     steps:
-      - name: Create Team and Repo Safe Mode
-        env:
-          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
-          ORG_NAME: "UI-CN-405"
-          TEMPLATE_REPO: "project-template"
-          TA_TEAM_SLUG: "tas"
-          ISSUE_TITLE: ${{ github.event.issue.title }}
-          ISSUE_NUMBER: ${{ github.event.issue.number }}
-          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up GitHub CLI
         run: |
-          set +e  # جلوگیری از متوقف شدن اکشن در صورت بروز خطا
-          
-          TEAM_SLUG=$(echo "$ISSUE_TITLE" | sed 's/.*: *//' | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-_')
-          if [ -z "$TEAM_SLUG" ] || [ "$TEAM_SLUG" = "team" ]; then
-            TEAM_SLUG="group-$ISSUE_NUMBER"
+          echo "${{ secrets.ORG_ADMIN_TOKEN }}" | gh auth login --with-token
+
+      - name: Parse Issue Body & Extract Team Info
+        id: parse
+        env:
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          # استخراج نام گروه (Team Name)
+          TEAM_NAME=$(echo "$ISSUE_BODY" | grep -i "Team Name" | head -n 1 | sed 's/.*: *//' | tr -d '\r' | xargs)
+          if [ -z "$TEAM_NAME" ]; then
+            TEAM_NAME="team-$(date +%s)"
           fi
+          # تبدیل به حروف کوچک و جایگزینی فاصله‌ها با خط تیره
+          REPO_NAME="project-$(echo "$TEAM_NAME" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')"
+          echo "repo_name=$REPO_NAME" >> $GITHUB_OUTPUT
+
+          # استخراج نام‌های کاربری گیت‌هاب از متن ایشو
+          # فرض بر این است که نام‌های کاربری جلوی عبارت‌های مثل Lead یا Member یا خط تیره (-) قرار دارند
+          USERS=$(echo "$ISSUE_BODY" | grep -iE "(Lead|عضو|مخاطب|-)" | sed 's/.*: *//' | tr -d '\r' | xargs)
+          echo "usernames=$USERS" >> $GITHUB_OUTPUT
+
+      - name: Create Repository from Template
+        env:
+          REPO_NAME: ${{ steps.parse.outputs.repo_name }}
+        run: |
+          ORG="UI-CN-405"
+          TEMPLATE="project-template"
           
-          REPO_NAME="project-$TEAM_SLUG"
-          echo "Target Team: $TEAM_SLUG, Repo: $REPO_NAME"
+          # بررسی اینکه آیا مخزن از قبل وجود دارد یا خیر
+          if gh repo view "$ORG/$REPO_NAME" &>/dev/null; then
+            echo "Repository $ORG/$REPO_NAME already exists."
+          else
+            # ساخت مخزن خصوصی از روی قالب
+            gh repo create "$ORG/$REPO_NAME" --private --template="$ORG/$TEMPLATE"
+            echo "Repository $ORG/$REPO_NAME created successfully from template."
+          fi
 
-          # ۱. ساخت تیم
-          gh api --method POST "/orgs/$ORG_NAME/teams" -f name="$TEAM_SLUG" -f privacy="secret"
+      - name: Add Collaborators to Repository
+        env:
+          REPO_NAME: ${{ steps.parse.outputs.repo_name }}
+          USERNAMES: ${{ steps.parse.outputs.usernames }}
+        run: |
+          ORG="UI-CN-405"
+          
+          # جداسازی نام‌های کاربری و اضافه کردن به عنوان همکار
+          for user in $USERNAMES; do
+            # رد کردن کلمات کلیدی احتمالی
+            if [ "$user" = "-" ] || [ -z "$user" ]; then
+              continue
+            fi
+            
+            echo "Adding $user as collaborator to $ORG/$REPO_NAME..."
+            gh api -X PUT /repos/$ORG/$REPO_NAME/collaborators/$user -f permission='push' || echo "Failed to add $user"
+          done
 
-          # ۲. افزودن کاربر
-          gh api --method PUT "/orgs/$ORG_NAME/teams/$TEAM_SLUG/memberships/$ISSUE_AUTHOR" -f role="member"
-
-          # ۳. ساخت مخزن از روی Template
-          gh repo create "$ORG_NAME/$REPO_NAME" --private --template "$ORG_NAME/$TEMPLATE_REPO"
-          sleep 3
-
-          # ۴. تنظیم دسترسی‌ها
-          gh api --method PUT "/orgs/$ORG_NAME/teams/$TEAM_SLUG/repos/$ORG_NAME/$REPO_NAME" -f permission="push"
-          gh api --method PUT "/orgs/$ORG_NAME/teams/$TA_TEAM_SLUG/repos/$ORG_NAME/$REPO_NAME" -f permission="maintain"
-
-          # ۵. کامنت و بستن ایشو
-          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "### ✅ مخزن گروه با موفقیت ساخته شد!
-
-          🔗 **لینک مخزن خصوصی شما:** https://github.com/$ORG_NAME/$REPO_NAME"
-
-          gh issue close "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY"
-          exit 0
+      - name: Comment on Issue and Close
+        env:
+          REPO_NAME: ${{ steps.parse.outputs.repo_name }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          ORG="UI-CN-405"
+          REPO_URL="https://github.com/$ORG/$REPO_NAME"
+          
+          COMMENT="🎉 گروه گرامی، مخزن اختصاصی شما با موفقیت ساخته شد و اعضای ذکرشده به عنوان همکار اضافه شدند!\n\n🔗 لینک مخزن شما: $REPO_URL"
+          
+          gh issue comment $ISSUE_NUMBER --body "$COMMENT"
+          gh issue close $ISSUE_NUMBER
