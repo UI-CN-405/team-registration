@@ -8,9 +8,6 @@ jobs:
   provision:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
-
       - name: Create Team and Repo
         env:
           GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
@@ -21,7 +18,6 @@ jobs:
           ISSUE_NUMBER: ${{ github.event.issue.number }}
           ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
         run: |
-          # استخراج نام تیم از عنوان ایشو (مثلا اگر عنوان [Team Registration]: group-01 باشد، نام تیم group-01 می‌شود)
           TEAM_SLUG=$(echo "$ISSUE_TITLE" | sed 's/.*: *//' | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-_')
           
           if [ -z "$TEAM_SLUG" ] || [ "$TEAM_SLUG" = "team" ]; then
@@ -31,7 +27,7 @@ jobs:
           REPO_NAME="project-$TEAM_SLUG"
           echo "Target Team: $TEAM_SLUG, Repo: $REPO_NAME"
 
-          # ۱. ساخت تیم در سازمان
+          # ۱. ساخت تیم با توکن ادمین
           gh api --method POST "/orgs/$ORG_NAME/teams" \
             -f name="$TEAM_SLUG" \
             -f privacy="secret" || true
@@ -44,7 +40,7 @@ jobs:
           gh repo create "$ORG_NAME/$REPO_NAME" --private --template "$ORG_NAME/$TEMPLATE_REPO" || true
           sleep 3
 
-          # ۴. تنظیم دسترسی Write برای تیم دانشجو و Maintain برای تیم TAs
+          # ۴. تنظیم دسترسی‌ها
           gh api --method PUT "/orgs/$ORG_NAME/teams/$TEAM_SLUG/repos/$ORG_NAME/$REPO_NAME" \
             -f permission="push"
           gh api --method PUT "/orgs/$ORG_NAME/teams/$TA_TEAM_SLUG/repos/$ORG_NAME/$REPO_NAME" \
