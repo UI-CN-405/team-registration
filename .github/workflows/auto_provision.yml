@@ -1,0 +1,91 @@
+name: Auto Provision Student Team & Repo
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+      ORG_NAME: "UI-CN-405"
+      TEMPLATE_REPO: "project-template"
+      TA_TEAM_SLUG: "tas"
+      ISSUE_BODY: ${{ github.event.issue.body }}
+      ISSUE_NUMBER: ${{ github.event.issue.number }}
+      ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
+      ISSUE_TITLE: ${{ github.event.issue.title }}
+    steps:
+      - name: Auto Label and Provision
+        run: |
+          if [[ "$ISSUE_TITLE" == *"[Team Registration]*" ]] || true; then
+              echo "در حال اعمال خودکار لیبل و بررسی فرم..."
+              gh issue add-label "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --label "team-registration" || true
+          
+              python3 - << 'EOF'
+              import os, re, subprocess, time, sys
+
+              body = os.environ["ISSUE_BODY"]
+              org = os.environ["ORG_NAME"]
+              template = os.environ["TEMPLATE_REPO"]
+              ta_team = os.environ["TA_TEAM_SLUG"]
+              issue_num = os.environ["ISSUE_NUMBER"]
+              author = os.environ["ISSUE_AUTHOR"]
+
+              def comment_and_close(msg, state="closed"):
+                  subprocess.run(["gh", "issue", "comment", issue_num, "--repo", os.environ["GITHUB_REPOSITORY"], "--body", msg])
+                  if state == "closed":
+                      subprocess.run(["gh", "issue", "close", issue_num, "--repo", os.environ["GITHUB_REPOSITORY"]])
+
+              team_match = re.search(r"### Team Name\s*\n+\s*([^\n\r]+)", body, re.DOTALL)
+              members_match = re.search(r"### Team Members GitHub Usernames\s*\n+\s*([^\n\r]+)", body, re.DOTALL)
+
+              if not team_match or not members_match:
+                  comment_and_close("❌ Invalid form structure. Please submit a new issue using the official registration form without modifying the headers.")
+                  sys.exit(1)
+
+              raw_team = team_match.group(1).strip().lower()
+              team_slug = re.sub(r"[^a-z0-9\-]", "-", raw_team).strip("-")
+              repo_name = f"project-{team_slug}"
+
+              raw_members = [u.strip().lstrip("@") for u in members_match.group(1).split(",") if u.strip()]
+              if author not in raw_members:
+                  raw_members.append(author)
+
+              team_res = subprocess.run(
+                  ["gh", "api", "--method", "POST", f"/orgs/{org}/teams", "-f", f"name={team_slug}", "-f", "privacy=secret"],
+                  capture_output=True, text=True
+              )
+              if team_res.returncode != 0:
+                  comment_and_close(f"⚠️ Error: Team or repository `{team_slug}` already exists. Please open a new issue with a different team name.")
+                  sys.exit(1)
+
+              invited = []
+              for user in raw_members:
+                  r = subprocess.run(
+                      ["gh", "api", "--method", "PUT", f"/orgs/{org}/teams/{team_slug}/memberships/{user}", "-f", "role=member"],
+                      capture_output=True, text=True
+                  )
+                  if r.returncode == 0:
+                      invited.append(f"@{user}")
+
+              subprocess.run(
+                  ["gh", "repo", "create", f"{org}/{repo_name}", "--private", "--template", f"{org}/{template}"],
+                  check=True
+              )
+              time.sleep(3)
+
+              subprocess.run(["gh", "api", "--method", "PUT", f"/orgs/{org}/teams/{team_slug}/repos/{org}/{repo_name}", "-f", "permission=push"])
+              subprocess.run(["gh", "api", "--method", "PUT", f"/orgs/{org}/teams/{ta_team}/repos/{org}/{repo_name}", "-f", "permission=maintain"])
+
+              users_str = " ".join(invited)
+              msg = (
+                  f"### ✅ Team `{team_slug}` has been successfully provisioned!\n\n"
+                  f"**Invited Members:** {users_str}\n"
+                  f"🔗 **Private Project Repository:** https://github.com/{org}/{repo_name}\n\n"
+                  f"> **Important:** All team members must first **Accept** the organization invitation via email or directly at `https://github.com/orgs/{org}/invitation` before they can access the repository."
+              )
+              comment_and_close(msg)
+              EOF
+          fi
