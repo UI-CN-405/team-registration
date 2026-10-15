@@ -7,70 +7,53 @@ on:
 jobs:
   provision:
     runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
-      ORG_NAME: "UI-CN-405"
-      TEMPLATE_REPO: "project-template"
-      TA_TEAM_SLUG: "tas"
-      ISSUE_BODY: ${{ github.event.issue.body }}
-      ISSUE_NUMBER: ${{ github.event.issue.number }}
-      ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
     steps:
-      - name: Provision Team and Repo
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Create Team and Repo
+        env:
+          GH_TOKEN: ${{ secrets.ORG_ADMIN_TOKEN }}
+          ORG_NAME: "UI-CN-405"
+          TEMPLATE_REPO: "project-template"
+          TA_TEAM_SLUG: "tas"
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_AUTHOR: ${{ github.event.issue.user.login }}
         run: |
-          python3 - << 'EOF'
-          import os, re, subprocess, time, sys
+          # استخراج نام تیم از عنوان ایشو (مثلا اگر عنوان [Team Registration]: group-01 باشد، نام تیم group-01 می‌شود)
+          TEAM_SLUG=$(echo "$ISSUE_TITLE" | sed 's/.*: *//' | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9-_')
+          
+          if [ -z "$TEAM_SLUG" ] || [ "$TEAM_SLUG" = "team" ]; then
+            TEAM_SLUG="group-$ISSUE_NUMBER"
+          fi
+          
+          REPO_NAME="project-$TEAM_SLUG"
+          echo "Target Team: $TEAM_SLUG, Repo: $REPO_NAME"
 
-          body = os.environ["ISSUE_BODY"]
-          org = os.environ["ORG_NAME"]
-          template = os.environ["TEMPLATE_REPO"]
-          ta_team = os.environ["TA_TEAM_SLUG"]
-          issue_num = os.environ["ISSUE_NUMBER"]
-          author = os.environ["ISSUE_AUTHOR"]
+          # ۱. ساخت تیم در سازمان
+          gh api --method POST "/orgs/$ORG_NAME/teams" \
+            -f name="$TEAM_SLUG" \
+            -f privacy="secret" || true
 
-          def comment_and_close(msg, state="closed"):
-              subprocess.run(["gh", "issue", "comment", issue_num, "--repo", os.environ["GITHUB_REPOSITORY"], "--body", msg])
-              if state == "closed":
-                  subprocess.run(["gh", "issue", "close", issue_num, "--repo", os.environ["GITHUB_REPOSITORY"]])
+          # ۲. افزودن سرگروه به تیم
+          gh api --method PUT "/orgs/$ORG_NAME/teams/$TEAM_SLUG/memberships/$ISSUE_AUTHOR" \
+            -f role="member" || true
 
-          # استخراج ساده‌تر نام تیم و اعضا با پایتون
-          team_match = re.search(r"Team Name[:\s]*([a-z0-9\-]+)", body, re.IGNORECASE)
-          members_match = re.search(r"Team Members.*?\n+\s*([^\n\r]+)", body, re.DOTALL | re.IGNORECASE)
+          # ۳. ساخت مخزن از روی Template
+          gh repo create "$ORG_NAME/$REPO_NAME" --private --template "$ORG_NAME/$TEMPLATE_REPO" || true
+          sleep 3
 
-          if not team_match:
-              comment_and_close("❌ خطا: نام تیم پیدا نشد. لطفاً در متن ایشو کلمه Team Name را بنویسید.")
-              sys.exit(1)
+          # ۴. تنظیم دسترسی Write برای تیم دانشجو و Maintain برای تیم TAs
+          gh api --method PUT "/orgs/$ORG_NAME/teams/$TEAM_SLUG/repos/$ORG_NAME/$REPO_NAME" \
+            -f permission="push"
+          gh api --method PUT "/orgs/$ORG_NAME/teams/$TA_TEAM_SLUG/repos/$ORG_NAME/$REPO_NAME" \
+            -f permission="maintain"
 
-          team_slug = team_match.group(1).strip().lower()
-          repo_name = f"project-{team_slug}"
+          # ۵. کامنت کردن لینک مخزن زیر ایشو و بستن آن
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body "### ✅ تیم و مخزن با موفقیت ساخته شد!
 
-          raw_members = [author]
-          if members_match:
-              members_str = members_match.group(1)
-              extracted = [u.strip().lstrip("@") for u in members_str.split(",") if u.strip()]
-              for m in extracted:
-                  if m not in raw_members:
-                      raw_members.append(m)
+          🔗 **لینک مخزن خصوصی شما:** https://github.com/$ORG_NAME/$REPO_NAME"
 
-          # ۱. ساخت تیم
-          subprocess.run(["gh", "api", "--method", "POST", f"/orgs/{org}/teams", "-f", f"name={team_slug}", "-f", "privacy=secret"])
-
-          # ۲. افزودن اعضا
-          invited = []
-          for user in raw_members:
-              r = subprocess.run(["gh", "api", "--method", "PUT", f"/orgs/{org}/teams/{team_slug}/memberships/{user}", "-f", "role=member"], capture_output=True)
-              if r.returncode == 0:
-                  invited.append(f"@{user}")
-
-          # ۳. ساخت مخزن از Template
-          subprocess.run(["gh", "repo", "create", f"{org}/{repo_name}", "--private", "--template", f"{org}/{template}"], check=True)
-          time.sleep(3)
-
-          # ۴. تنظیم دسترسی‌ها
-          subprocess.run(["gh", "api", "--method", "PUT", f"/orgs/{org}/teams/{team_slug}/repos/{org}/{repo_name}", "-f", "permission=push"])
-          subprocess.run(["gh", "api", "--method", "PUT", f"/orgs/{org}/teams/{ta_team}/repos/{org}/{repo_name}", "-f", "permission=maintain"])
-
-          users_str = " ".join(invited)
-          msg = f"### ✅ مخزن گروه ساخته شد!\n\n🔗 لینک: https://github.com/{org}/{repo_name}"
-          comment_and_close(msg)
-          EOF
+          gh issue close "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY"
